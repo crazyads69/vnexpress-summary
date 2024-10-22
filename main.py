@@ -90,18 +90,23 @@ class BaseCrawler(ABC):
 class VNExpressCrawler(BaseCrawler):
     def __init__(self, **kwargs):
         self.__dict__.update(kwargs)
+        # self.article_type_dict = {
+        #     0: "thoi-su",
+        #     1: "du-lich",
+        #     2: "the-gioi",
+        #     3: "kinh-doanh",
+        #     4: "khoa-hoc",
+        #     5: "giai-tri",
+        #     6: "the-thao",
+        #     7: "phap-luat",
+        #     8: "giao-duc",
+        #     9: "suc-khoe",
+        #     10: "doi-song",
+        # }
         self.article_type_dict = {
-            0: "thoi-su",
-            1: "du-lich",
-            2: "the-gioi",
-            3: "kinh-doanh",
-            4: "khoa-hoc",
-            5: "giai-tri",
-            6: "the-thao",
-            7: "phap-luat",
-            8: "giao-duc",
-            9: "suc-khoe",
-            10: "doi-song",
+            0: "tin-xem-nhieu",
+            1: "tin-nong",
+            2: "tin-tuc-24h",
         }
         self.db_manager = DatabaseManager()
         self.session = None
@@ -251,6 +256,9 @@ class TelegramPoster:
                 "giao-duc": "📚",
                 "suc-khoe": "🏥",
                 "doi-song": "🌟",
+                "tin-xem-nhieu": "🏆",
+                "tin-tuc-24h": "🕒",
+                "tin-nong": "🔥",
             }
 
             category_emoji = category_emojis.get(article["category"], "📄")
@@ -277,7 +285,9 @@ class TelegramPoster:
 async def process_articles():
     logger.info("Starting hourly article processing...")
 
-    crawler = VNExpressCrawler(num_workers=5, total_pages=2)
+    crawler = VNExpressCrawler(
+        num_workers=5, total_pages=1
+    )  # Change total_pages to 1 for only get the latest news
     summarizer = GroqSummarizer()
     poster = TelegramPoster()
 
