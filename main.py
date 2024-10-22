@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 
 
 class DatabaseManager:
-    def __init__(self, db_name="crawled_articles.db"):
+
+    def __init__(self, db_name="data/crawled_articles.db"):
         self.db_name = db_name
 
     async def create_table(self):
