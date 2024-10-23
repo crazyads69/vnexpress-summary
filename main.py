@@ -31,50 +31,77 @@ logger = logging.getLogger(__name__)
 
 
 class DatabaseManager:
-
     def __init__(self, db_name="data/crawled_articles.db"):
         self.db_name = db_name
+        self._lock = asyncio.Lock()  # Add lock for database operations
 
     async def create_table(self):
-        async with aiosqlite.connect(self.db_name) as db:
-            await db.execute(
+        async with self._lock:
+            async with aiosqlite.connect(self.db_name) as db:
+                await db.execute(
+                    """
+                CREATE TABLE IF NOT EXISTS articles (
+                    url TEXT PRIMARY KEY,
+                    title TEXT,
+                    category TEXT,
+                    published_date TEXT,
+                    crawled_date TEXT,
+                    summary TEXT
+                )
                 """
-            CREATE TABLE IF NOT EXISTS articles (
-                url TEXT PRIMARY KEY,
-                title TEXT,
-                category TEXT,
-                published_date TEXT,
-                crawled_date TEXT,
-                summary TEXT
-            )
-            """
-            )
-            await db.commit()
+                )
+                await db.commit()
 
     async def insert_article(self, article: Dict, summary: str):
-        async with aiosqlite.connect(self.db_name) as db:
-            await db.execute(
-                """
-            INSERT OR REPLACE INTO articles (url, title, category, published_date, crawled_date, summary)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-                (
-                    article["url"],
-                    article["title"],
-                    article["category"],
-                    article["published_date"],
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    summary,
-                ),
-            )
-            await db.commit()
+        async with self._lock:
+            async with aiosqlite.connect(self.db_name) as db:
+                await db.execute(
+                    """
+                INSERT OR REPLACE INTO articles (url, title, category, published_date, crawled_date, summary)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                    (
+                        article["url"],
+                        article["title"],
+                        article["category"],
+                        article["published_date"],
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        summary,
+                    ),
+                )
+                await db.commit()
 
     async def is_article_crawled(self, url: str) -> bool:
-        async with aiosqlite.connect(self.db_name) as db:
-            async with db.execute(
-                "SELECT url FROM articles WHERE url = ?", (url,)
-            ) as cursor:
-                return await cursor.fetchone() is not None
+        async with self._lock:
+            async with aiosqlite.connect(self.db_name) as db:
+                async with db.execute(
+                    "SELECT url FROM articles WHERE url = ?", (url,)
+                ) as cursor:
+                    return await cursor.fetchone() is not None
+
+    async def try_reserve_article(self, article: Dict) -> bool:
+        """Attempt to reserve an article for processing. Returns True if successful."""
+        async with self._lock:
+            if await self.is_article_crawled(article["url"]):
+                return False
+
+            # Insert a placeholder to reserve the article
+            async with aiosqlite.connect(self.db_name) as db:
+                await db.execute(
+                    """
+                INSERT OR IGNORE INTO articles (url, title, category, published_date, crawled_date)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                    (
+                        article["url"],
+                        article["title"],
+                        article["category"],
+                        article["published_date"],
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    ),
+                )
+                await db.commit()
+                return True
 
 
 class BaseCrawler(ABC):
@@ -110,13 +137,18 @@ class VNExpressCrawler(BaseCrawler):
         }
         self.db_manager = DatabaseManager()
         self.session = None
+        self._session_lock = asyncio.Lock()  # Add lock for session management
 
     async def create_session(self):
-        self.session = aiohttp.ClientSession()
+        async with self._session_lock:
+            if not self.session:
+                self.session = aiohttp.ClientSession()
 
     async def close_session(self):
-        if self.session:
-            await self.session.close()
+        async with self._session_lock:
+            if self.session:
+                await self.session.close()
+                self.session = None
 
     async def extract_content(
         self, url: str
@@ -214,6 +246,7 @@ class GroqSummarizer:
             - Sử dụng ngôn ngữ tự nhiên, dễ hiểu
             - Không thêm thông tin không có trong bài gốc
             - Chỉ trả lời bằng tiếng Việt
+            - Không trả lời các thông tin khác ngoài việc tóm tắt
             """
 
             completion = await asyncio.to_thread(
@@ -285,9 +318,7 @@ class TelegramPoster:
 async def process_articles():
     logger.info("Starting hourly article processing...")
 
-    crawler = VNExpressCrawler(
-        num_workers=5, total_pages=1
-    )  # Change total_pages to 1 for only get the latest news
+    crawler = VNExpressCrawler(num_workers=5, total_pages=1)
     summarizer = GroqSummarizer()
     poster = TelegramPoster()
 
@@ -300,13 +331,15 @@ async def process_articles():
             articles = await crawler.get_latest_articles(category)
 
             for article in articles:
-                if article["content"]:
-                    summary = await summarizer.summarize(article["content"])
-                    if summary:
-                        await poster.post_update(article, summary)
-                        await crawler.db_manager.insert_article(article, summary)
+                # Try to reserve the article before processing
+                if await crawler.db_manager.try_reserve_article(article):
+                    if article["content"]:
+                        summary = await summarizer.summarize(article["content"])
+                        if summary:
+                            await poster.post_update(article, summary)
+                            await crawler.db_manager.insert_article(article, summary)
 
-                await asyncio.sleep(3)
+                    await asyncio.sleep(3)
 
             await asyncio.sleep(5)
 
